@@ -5,8 +5,89 @@
 using Nan::ObjectWrap;
 using namespace spellchecker;
 using namespace v8;
+using Nan::AsyncQueueWorker;
+using Nan::AsyncWorker;
+using Nan::Callback;
+using Nan::New;
+using Nan::Null;
+using Nan::To;
 
 namespace {
+
+class CheckSpellingWorker : public AsyncWorker {
+  public:
+    CheckSpellingWorker(Callback *callback, SpellcheckerImplementation *impl, std::vector<uint16_t>& text)
+        : AsyncWorker(callback), impl(impl), text(text) {}
+    ~CheckSpellingWorker() {}
+
+    void Execute()
+    {
+      misspelled_ranges = impl->CheckSpelling(text.data(), text.size());
+    }
+
+    // Executed when the async work is complete
+    // this function will be run inside the main event loop
+    // so it is safe to use V8 again
+    void HandleOKCallback()
+    {
+      Local<Array> misspelledRanges = Nan::New<Array>();
+      std::vector<MisspelledRange>::const_iterator iter = misspelled_ranges.begin();
+      for (; iter != misspelled_ranges.end(); ++iter)
+      {
+        size_t index = iter - misspelled_ranges.begin();
+        uint32_t start = iter->start, end = iter->end;
+
+        Local<Object> misspelled_range = Nan::New<Object>();
+        misspelled_range->Set(Nan::New("start").ToLocalChecked(), Nan::New<Integer>(start));
+        misspelled_range->Set(Nan::New("end").ToLocalChecked(), Nan::New<Integer>(end));
+        misspelledRanges->Set(index, misspelled_range);
+      }
+      
+      Local<Value> argv[] = {
+          Null(), misspelledRanges};
+
+      callback->Call(2, argv);
+    }
+
+    private:
+      SpellcheckerImplementation *impl;
+      std::vector<uint16_t> text;
+      std::vector<MisspelledRange> misspelled_ranges;
+};
+
+class GetCorrectionsForMisspellingWorker : public AsyncWorker {
+  public:
+    GetCorrectionsForMisspellingWorker(Callback *callback, SpellcheckerImplementation *impl, std::string& word)
+        : AsyncWorker(callback), impl(impl), word(word) {}
+    ~GetCorrectionsForMisspellingWorker() {}
+
+    void Execute()
+    {
+      corrections = impl->GetCorrectionsForMisspelling(word);
+    }
+
+    void HandleOKCallback()
+    {
+      Local<Array> result = Nan::New<Array>(corrections.size());
+      for (size_t i = 0; i < corrections.size(); ++i)
+      {
+        const std::string &word = corrections[i];
+
+        Nan::MaybeLocal<String> val = Nan::New<String>(word.data(), word.size());
+        result->Set(i, val.ToLocalChecked());
+      }
+
+      Local<Value> argv[] = {
+          Null(), result};
+
+      callback->Call(2, argv);
+    }
+
+    private:
+      SpellcheckerImplementation *impl;
+      std::string word;
+      std::vector<std::string> corrections;
+};
 
 class Spellchecker : public Nan::ObjectWrap {
   SpellcheckerImplementation* impl;
@@ -66,7 +147,7 @@ class Spellchecker : public Nan::ObjectWrap {
     info.GetReturnValue().Set(Nan::New(that->impl->IsMisspelled(word)));
   }
 
-  static NAN_METHOD(CheckSpelling) {
+  static NAN_METHOD(CheckSpellingAsync) {
     Nan::HandleScope scope;
     if (info.Length() < 1) {
       return Nan::ThrowError("Bad argument");
@@ -77,29 +158,16 @@ class Spellchecker : public Nan::ObjectWrap {
       return Nan::ThrowError("Bad argument");
     }
 
-    Local<Array> result = Nan::New<Array>();
-    info.GetReturnValue().Set(result);
-
-    if (string->Length() == 0) {
+    if (string->Length() == 0)
+    {
       return;
     }
-
     std::vector<uint16_t> text(string->Length() + 1);
     string->Write(reinterpret_cast<uint16_t *>(text.data()));
 
-    Spellchecker* that = Nan::ObjectWrap::Unwrap<Spellchecker>(info.Holder());
-    std::vector<MisspelledRange> misspelled_ranges = that->impl->CheckSpelling(text.data(), text.size());
-
-    std::vector<MisspelledRange>::const_iterator iter = misspelled_ranges.begin();
-    for (; iter != misspelled_ranges.end(); ++iter) {
-      size_t index = iter - misspelled_ranges.begin();
-      uint32_t start = iter->start, end = iter->end;
-
-      Local<Object> misspelled_range = Nan::New<Object>();
-      misspelled_range->Set(Nan::New("start").ToLocalChecked(), Nan::New<Integer>(start));
-      misspelled_range->Set(Nan::New("end").ToLocalChecked(), Nan::New<Integer>(end));
-      result->Set(index, misspelled_range);
-    }
+    Callback *callback = new Callback(info[1].As<Function>());
+    Spellchecker *that = Nan::ObjectWrap::Unwrap<Spellchecker>(info.Holder());
+    AsyncQueueWorker(new CheckSpellingWorker(callback, that->impl, text));
   }
 
   static NAN_METHOD(Add) {
@@ -151,27 +219,17 @@ class Spellchecker : public Nan::ObjectWrap {
     info.GetReturnValue().Set(result);
   }
 
-  static NAN_METHOD(GetCorrectionsForMisspelling) {
+  static NAN_METHOD(GetCorrectionsForMisspellingAsync)
+  {
     Nan::HandleScope scope;
     if (info.Length() < 1) {
       return Nan::ThrowError("Bad argument");
     }
 
     Spellchecker* that = Nan::ObjectWrap::Unwrap<Spellchecker>(info.Holder());
-
     std::string word = *String::Utf8Value(info[0]);
-    std::vector<std::string> corrections =
-      that->impl->GetCorrectionsForMisspelling(word);
-
-    Local<Array> result = Nan::New<Array>(corrections.size());
-    for (size_t i = 0; i < corrections.size(); ++i) {
-      const std::string& word = corrections[i];
-
-      Nan::MaybeLocal<String> val = Nan::New<String>(word.data(), word.size());
-      result->Set(i, val.ToLocalChecked());
-    }
-
-    info.GetReturnValue().Set(result);
+    Callback *callback = new Callback(info[1].As<Function>());
+    AsyncQueueWorker(new GetCorrectionsForMisspellingWorker(callback, that->impl, word));
   }
 
   Spellchecker() {
@@ -192,9 +250,9 @@ class Spellchecker : public Nan::ObjectWrap {
 
     Nan::SetMethod(tpl->InstanceTemplate(), "setDictionary", Spellchecker::SetDictionary);
     Nan::SetMethod(tpl->InstanceTemplate(), "getAvailableDictionaries", Spellchecker::GetAvailableDictionaries);
-    Nan::SetMethod(tpl->InstanceTemplate(), "getCorrectionsForMisspelling", Spellchecker::GetCorrectionsForMisspelling);
+    Nan::SetMethod(tpl->InstanceTemplate(), "getCorrectionsForMisspellingAsync", Spellchecker::GetCorrectionsForMisspellingAsync);
     Nan::SetMethod(tpl->InstanceTemplate(), "isMisspelled", Spellchecker::IsMisspelled);
-    Nan::SetMethod(tpl->InstanceTemplate(), "checkSpelling", Spellchecker::CheckSpelling);
+    Nan::SetMethod(tpl->InstanceTemplate(), "checkSpellingAsync", Spellchecker::CheckSpellingAsync);
     Nan::SetMethod(tpl->InstanceTemplate(), "add", Spellchecker::Add);
     Nan::SetMethod(tpl->InstanceTemplate(), "remove", Spellchecker::Remove);
 
