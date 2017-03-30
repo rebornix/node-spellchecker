@@ -30,6 +30,8 @@ class CheckSpellingWorker : public AsyncWorker {
     // so it is safe to use V8 again
     void HandleOKCallback()
     {
+      HandleScope scope;
+
       Local<Array> misspelledRanges = Nan::New<Array>();
       std::vector<MisspelledRange>::const_iterator iter = misspelled_ranges.begin();
       for (; iter != misspelled_ranges.end(); ++iter)
@@ -68,6 +70,8 @@ class GetCorrectionsForMisspellingWorker : public AsyncWorker {
 
     void HandleOKCallback()
     {
+      HandleScope scope;
+
       Local<Array> result = Nan::New<Array>(corrections.size());
       for (size_t i = 0; i < corrections.size(); ++i)
       {
