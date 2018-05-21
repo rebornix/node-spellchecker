@@ -10,8 +10,8 @@ npm install spellchecker
 
 ## Using
 
-```coffeescript
-SpellChecker = require 'spellchecker'
+```javascript
+var SpellChecker = require('spellchecker')
 ```
 
 ### SpellChecker.isMisspelled(word)
